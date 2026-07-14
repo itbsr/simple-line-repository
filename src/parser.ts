@@ -17,6 +17,15 @@ const TIME_PREFIX_PATTERN = /^(?<hour>\d{2}):(?<minute>\d{2}) /;
 // Confirmed against real LINE data copied from the app: the header
 // separator is always a single half-width space.
 const SEPARATOR = /^ /;
+const WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
 
 export function matchDateHeader(line: string): DateHeaderMatch | null {
   const m = DATE_HEADER_PATTERN.exec(line);
@@ -27,6 +36,36 @@ export function matchDateHeader(line: string): DateHeaderMatch | null {
     day: Number(m.groups.day),
     weekday: m.groups.weekday,
   };
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+function validateDateHeader(match: DateHeaderMatch): string | null {
+  const d = new Date(match.year, match.month - 1, match.day);
+  const isRealDate =
+    d.getFullYear() === match.year &&
+    d.getMonth() === match.month - 1 &&
+    d.getDate() === match.day;
+  if (!isRealDate) {
+    return `存在しない日付です: ${match.year}.${pad2(match.month)}.${pad2(match.day)}`;
+  }
+  const actualWeekday = WEEKDAYS[d.getDay()];
+  if (actualWeekday !== match.weekday) {
+    return `曜日が実際の日付と一致しません: ${match.year}.${pad2(match.month)}.${pad2(match.day)} は${actualWeekday}です（${match.weekday}と記載）`;
+  }
+  return null;
+}
+
+function validateTimeComponents(hour: number, minute: number): string | null {
+  if (hour > 23) {
+    return `時刻の時が不正です(0-23の範囲外): ${pad2(hour)}`;
+  }
+  if (minute > 59) {
+    return `時刻の分が不正です(0-59の範囲外): ${pad2(minute)}`;
+  }
+  return null;
 }
 
 export function matchMessageHeader(

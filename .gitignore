@@ -1,1 +1,6 @@
 AGENTS.md
+node_modules/
+dist/
+*.db
+*.sqlite
+*.sqlite3

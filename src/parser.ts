@@ -1,4 +1,10 @@
-import type { DateComponents } from "./types.ts";
+import type {
+  DateComponents,
+  ParseError,
+  ParseResult,
+  ParsedMessage,
+  ParserConfig,
+} from "./types.ts";
 
 interface MessageHeaderMatch {
   hour: number;
@@ -27,6 +33,13 @@ const WEEKDAYS = [
   "Saturday",
 ];
 
+// Structural match only (does the line have the right shape). Whether the
+// date/time is actually a real, self-consistent value is checked separately
+// by validateDateHeader/validateTimeComponents — see parse(). This alone is
+// NOT enough to treat a line as a genuine date header — see
+// matchConfirmedDateHeader, which also requires the next line to look like
+// a message header, since a quoted date inside message content is
+// byte-identical to a real one.
 export function matchDateHeader(line: string): DateHeaderMatch | null {
   const m = DATE_HEADER_PATTERN.exec(line);
   if (!m?.groups) return null;
@@ -38,8 +51,31 @@ export function matchDateHeader(line: string): DateHeaderMatch | null {
   };
 }
 
+// A date-header-shaped line only counts as a real date header when the
+// line right after it (or end of input) looks like a message header.
+// Otherwise it's indistinguishable from a quoted date inside a message's
+// content, so it's left for the caller to treat as an ordinary line
+// (continuation content, most likely) instead of a day change.
+function matchConfirmedDateHeader(
+  lines: string[],
+  index: number,
+  participants: string[],
+): DateHeaderMatch | null {
+  const match = matchDateHeader(lines[index]);
+  if (!match) return null;
+  const nextLine = lines[index + 1];
+  if (nextLine !== undefined && !matchMessageHeader(nextLine, participants)) {
+    return null;
+  }
+  return match;
+}
+
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
+}
+
+function dateValue(d: DateComponents): number {
+  return d.year * 10000 + d.month * 100 + d.day;
 }
 
 function validateDateHeader(match: DateHeaderMatch): string | null {
@@ -93,4 +129,120 @@ export function matchMessageHeader(
     }
   }
   return null;
+}
+
+function splitLines(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const trimmed = normalized.replace(/\n+$/, "");
+  return trimmed.split("\n");
+}
+
+export function parse(text: string, config: ParserConfig): ParseResult {
+  const lines = splitLines(text);
+  const participants = config.participants;
+
+  const messages: ParsedMessage[] = [];
+  const errors: ParseError[] = [];
+  let currentDate: DateComponents | null = null;
+  let lastConfirmedDate: DateComponents | null = null;
+  let current: {
+    hour: number;
+    minute: number;
+    username: string;
+    contentLines: string[];
+  } | null = null;
+
+  const flush = () => {
+    if (!current) return;
+    const content = current.contentLines.join("\n");
+    messages.push(
+      currentDate
+        ? {
+            date: currentDate,
+            hour: current.hour,
+            minute: current.minute,
+            username: current.username,
+            content,
+          }
+        : {
+            date: null,
+            hour: current.hour,
+            minute: current.minute,
+            username: current.username,
+            content,
+          },
+    );
+    current = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const dateMatch = matchConfirmedDateHeader(lines, i, participants);
+    if (dateMatch) {
+      const dateError = validateDateHeader(dateMatch);
+      if (dateError) {
+        errors.push({ line: i + 1, raw: line, reason: dateError });
+      } else if (
+        lastConfirmedDate &&
+        dateValue(dateMatch) < dateValue(lastConfirmedDate)
+      ) {
+        errors.push({
+          line: i + 1,
+          raw: line,
+          reason: `日付が後退しています: ${lastConfirmedDate.year}.${pad2(lastConfirmedDate.month)}.${pad2(lastConfirmedDate.day)} の次に ${dateMatch.year}.${pad2(dateMatch.month)}.${pad2(dateMatch.day)} は指定できません`,
+        });
+      } else {
+        flush();
+        currentDate = {
+          year: dateMatch.year,
+          month: dateMatch.month,
+          day: dateMatch.day,
+        };
+        lastConfirmedDate = currentDate;
+      }
+      continue;
+    }
+
+    const headerMatch = matchMessageHeader(line, participants);
+    if (headerMatch) {
+      const timeError = validateTimeComponents(
+        headerMatch.hour,
+        headerMatch.minute,
+      );
+      if (timeError) {
+        errors.push({ line: i + 1, raw: line, reason: timeError });
+      } else {
+        flush();
+        current = {
+          hour: headerMatch.hour,
+          minute: headerMatch.minute,
+          username: headerMatch.username,
+          contentLines: [headerMatch.content],
+        };
+      }
+      continue;
+    }
+
+    if (current) {
+      current.contentLines.push(line);
+      continue;
+    }
+
+    errors.push({
+      line: i + 1,
+      raw: line,
+      reason:
+        i === 0
+          ? "先頭行がメッセージ開始行または日付見出し行ではありません"
+          : "メッセージ開始行でも日付行でもなく、継続先のメッセージもありません",
+    });
+  }
+  flush();
+
+  if (errors.length > 0) {
+    return { ok: false, messages: [], errors };
+  }
+
+  return { ok: true, messages, errors: [] };
 }
